@@ -17,8 +17,8 @@ if not os.getenv("OPENAI_API_KEY") or not os.getenv("PINECONE_API_KEY"):
     st.error("Faltan variables de entorno: OPENAI_API_KEY o PINECONE_API_KEY. Configúralas y reinicia la app.")
     st.stop()
 
-if not os.path.exists("/Users/sebastian/Desktop/DOCS/SMF/Udemy/ChatGPT API/Condiciones_generales.pdf"):
-    st.error("No se encontró el PDF en la ruta indicada. Verifica el path y el nombre del archivo.")
+if not os.path.exists("Condiciones_generales.pdf"):
+    st.error("No se encontró el PDF en el directorio del proyecto. Asegúrate de que 'Condiciones_generales.pdf' esté en la raíz del repo.")
     st.stop()
 
 # Optional but nice-to-have for "hybrid": BM25 over local chunks
@@ -31,7 +31,7 @@ except Exception:
 # ───────────────────────────────────────────────────────────────────────────────
 # CONFIG (edit if you like)
 # ───────────────────────────────────────────────────────────────────────────────
-PDF_PATH = "/Users/sebastian/Desktop/DOCS/SMF/Udemy/ChatGPT API/Condiciones_generales.pdf"
+PDF_PATH = "Condiciones_generales.pdf"
 
 INDEX_NAME = "test-six"                     # new index we will (auto) create
 NAMESPACE  = "warranty-es"                  # keep warranty data separate

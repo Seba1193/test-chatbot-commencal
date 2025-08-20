@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# venvs
+.venv/
+.venv_smf/
+
+# Streamlit local secrets (never commit)
+.streamlit/secrets.toml

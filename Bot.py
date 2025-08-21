@@ -17,8 +17,10 @@ if not os.getenv("OPENAI_API_KEY") or not os.getenv("PINECONE_API_KEY"):
     st.error("Faltan variables de entorno: OPENAI_API_KEY o PINECONE_API_KEY. Configúralas y reinicia la app.")
     st.stop()
 
-if not os.path.exists("Condiciones_generales.pdf"):
-    st.error("No se encontró el PDF en el directorio del proyecto. Asegúrate de que 'Condiciones_generales.pdf' esté en la raíz del repo.")
+# Resolve PDF path from env/secret (falls back to repo root file)
+PDF_PATH = os.getenv("PDF_PATH", "Condiciones_generales.pdf")
+if not os.path.exists(PDF_PATH):
+    st.error(f"No se encontró el PDF en la ruta indicada: '{PDF_PATH}'. Verifica el path y nombre del archivo, súbelo al repo o define la variable `PDF_PATH` en Secrets.")
     st.stop()
 
 # Optional but nice-to-have for "hybrid": BM25 over local chunks
@@ -31,7 +33,6 @@ except Exception:
 # ───────────────────────────────────────────────────────────────────────────────
 # CONFIG (edit if you like)
 # ───────────────────────────────────────────────────────────────────────────────
-PDF_PATH = "Condiciones_generales.pdf"
 
 INDEX_NAME = "test-six"                     # new index we will (auto) create
 NAMESPACE  = "warranty-es"                  # keep warranty data separate
@@ -341,11 +342,12 @@ with st.sidebar:
     st.write("- **Embeddings:** text-embedding-3-small (1536)")
     st.write(f"- **Índice Pinecone:** `{INDEX_NAME}` (namespace: `{NAMESPACE}`)")
     st.write("- **Búsqueda:** híbrida (densa + BM25 local)")
+    st.write(f"- **PDF:** {PDF_PATH}")
     st.divider()
-    st.caption("Si es la primera vez, el índice se creará y se ingestará automáticamente.\n"
-               "Las claves deben venir de las variables de entorno OPENAI_API_KEY y PINECONE_API_KEY.\n"
-               "Para ejecutar: `streamlit run Bot.py`.\n"
-               "Paquete correcto: `pinecone` (no `pinecone-client`).")
+    #st.caption("Si es la primera vez, el índice se creará y se ingestará automáticamente.\n"
+     #          "Las claves deben venir de las variables de entorno OPENAI_API_KEY y PINECONE_API_KEY.\n"
+      #         "Para ejecutar: `streamlit run Bot.py`.\n"
+       #        "Paquete correcto: `pinecone` (no `pinecone-client`).")
 
     if st.button("🔁 Reingestar PDF en el índice"):
         # Clear caches so ingest runs again

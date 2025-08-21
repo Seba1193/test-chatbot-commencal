@@ -4,6 +4,13 @@ import uuid
 import re
 from typing import List, Dict, Tuple
 
+LANG_NAME_MAP = {
+    "Español": "español",
+    "English": "inglés",
+    "Français": "francés",
+    "Português": "portugués",
+}
+
 import streamlit as st
 from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
@@ -257,17 +264,17 @@ def hybrid_retrieve(query: str, top_k: int, id2chunk: Dict[str, Dict], bm25, tok
 # ───────────────────────────────────────────────────────────────────────────────
 # LLM ORCHESTRATION
 # ───────────────────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """Eres el *Asistente de Garantías Commencal*.
-Tu función es ayudar en a clientes con preguntas sobre **garantías de bicicletas** usando la información provista en el documento adjunto (fragmentos con número de página).
+SYSTEM_PROMPT = SYSTEM_PROMPT = """Eres el *Asistente de Garantías Commencal*.
+Tu función es ayudar a clientes con preguntas sobre **garantías de bicicletas** usando la información provista en el documento adjunto (fragmentos con número de página).
 Reglas:
+- Responde **en el mismo idioma que el usuario**, a menos que se te indique un idioma explícito en la configuración de la barra lateral.
 - Sé educado, claro y conciso. Usa viñetas cuando ayuden.
 - Puedes hacer **preguntas de seguimiento** para identificar modelo, año, tamaño de rueda, recorrido, etc., si es relevante.
 - Si la pregunta **no es sobre garantías**: ofrece una **breve orientación general** (1–2 frases) y **redirígela** inmediatamente al ámbito de garantías.
 - Si tu **confianza** en la información recuperada es baja, indica que **no encuentras** esa parte exacta en el documento y sugiere qué datos faltan o cómo reformular.
 - **No inventes** políticas ni detalles técnicos que no aparezcan en el documento.
-- **Se breve**, sin respuesta tediosas o muy largas. Tiene que ser fácil de leer y entender
-- Puedes responder en cualquier idioma, mantén el foco en garantías.
-"""
+- **Sé breve**, sin respuestas tediosas o muy largas. Tiene que ser fácil de leer y entender.
+- Puedes responder en cualquier idioma, mantén el foco en garantías."""
 
 def build_context_block(snippets: List[Dict]) -> str:
     # Keep total context reasonably small
@@ -296,6 +303,15 @@ def answer_query(query: str, history_for_llm: List[Dict]) -> Tuple[str, List[Dic
 
     context_block = build_context_block(snippets)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # Ajuste de idioma según la barra lateral
+    lang_choice = st.session_state.get("lang_choice", "Auto (mismo del usuario)")
+    if lang_choice != "Auto (mismo del usuario)":
+        # Forzar un idioma concreto
+        lang_label = LANG_NAME_MAP.get(lang_choice, "español")
+        messages.append({"role": "system", "content": f"Responde exclusivamente en {lang_label}."})
+    else:
+        # Reflejar el idioma del último mensaje del usuario
+        messages.append({"role": "system", "content": "Responde en el mismo idioma que el último mensaje del usuario."})
     messages.extend(history_for_llm)  # short chat history (user/assistant turns)
     messages.append({
         "role": "user",
@@ -348,6 +364,15 @@ with st.sidebar:
      #          "Las claves deben venir de las variables de entorno OPENAI_API_KEY y PINECONE_API_KEY.\n"
       #         "Para ejecutar: `streamlit run Bot.py`.\n"
        #        "Paquete correcto: `pinecone` (no `pinecone-client`).")
+
+        # Idioma de salida
+    lang_choice = st.selectbox(
+        "Idioma de respuesta",
+        ["Auto (mismo del usuario)", "Español", "English", "Français", "Português"],
+        index=0,
+        help="Elige un idioma fijo o deja 'Auto' para responder en el idioma del usuario."
+    )
+    st.session_state["lang_choice"] = lang_choice
 
     if st.button("🔁 Reingestar PDF en el índice"):
         # Clear caches so ingest runs again

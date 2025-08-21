@@ -30,6 +30,16 @@ if not os.path.exists(PDF_PATH):
     st.error(f"No se encontró el PDF en la ruta indicada: '{PDF_PATH}'. Verifica el path y nombre del archivo, súbelo al repo o define la variable `PDF_PATH` en Secrets.")
     st.stop()
 
+# Track PDF basename and a signature for cache-keying and metadata
+PDF_BASENAME = os.path.basename(PDF_PATH)
+def _pdf_signature(path: str) -> str:
+    try:
+        stt = os.stat(path)
+        return f"{stt.st_size}-{int(stt.st_mtime)}"
+    except Exception:
+        return str(time.time())
+PDF_SIG = _pdf_signature(PDF_PATH)
+
 # Optional but nice-to-have for "hybrid": BM25 over local chunks
 try:
     from rank_bm25 import BM25Okapi
@@ -90,7 +100,7 @@ def chunk_page_text(page_num: int, text: str, chunk_size: int, overlap: int) -> 
         })
         if end == L:
             break
-        start = max(end - overlap, end)  # safety
+        start = max(end - overlap, 0)  # advance with intended overlap
     return chunks
 
 def chunk_pdf(pages: List[Tuple[int, str]], size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> List[Dict]:
@@ -168,21 +178,25 @@ def upsert_chunks(index, client: OpenAI, chunks: List[Dict], namespace: str):
                 "metadata": {
                     "text": c["text"],
                     "page": c["page"],
-                    "source": "Condiciones_generales.pdf",
+                    "source": PDF_BASENAME,
                 }
             })
         index.upsert(vectors=vectors, namespace=namespace)
 
 def namespace_count(index, namespace: str) -> int:
-    stats = index.describe_index_stats()
-    ns = (stats or {}).get("namespaces", {})
-    return int(ns.get(namespace, {}).get("vector_count", 0))
+    try:
+        stats = index.describe_index_stats()
+        ns = (stats or {}).get("namespaces", {})
+        return int(ns.get(namespace, {}).get("vector_count", 0))
+    except Exception:
+        # If stats fail, act as if empty so we can upsert
+        return 0
 
 # ───────────────────────────────────────────────────────────────────────────────
 # INGEST (runs once; cached)
 # ───────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=True)
-def ingest_pdf_build_bm25_and_index():
+def ingest_pdf_build_bm25_and_index(_pdf_sig: str):
     """Reads the PDF, builds chunks, creates Pinecone index if needed,
     (re)upserts vectors for this namespace if empty, and builds BM25."""
     client, pc = get_clients()
@@ -210,17 +224,21 @@ def ingest_pdf_build_bm25_and_index():
 # RETRIEVAL
 # ───────────────────────────────────────────────────────────────────────────────
 def dense_search(index, client: OpenAI, query: str, top_k: int = DENSE_FETCH) -> Dict[str, float]:
-    q_emb = embed_texts(client, [query])[0]
-    res = index.query(
-        namespace=NAMESPACE,
-        vector=q_emb,
-        top_k=top_k,
-        include_metadata=True
-    )
-    scores = {}
-    for m in res.get("matches", []):
-        scores[m["id"]] = float(m["score"])
-    return scores
+    try:
+        q_emb = embed_texts(client, [query])[0]
+        res = index.query(
+            namespace=NAMESPACE,
+            vector=q_emb,
+            top_k=top_k,
+            include_metadata=True
+        )
+        scores = {}
+        for m in res.get("matches", []):
+            scores[m["id"]] = float(m["score"])
+        return scores
+    except Exception as e:
+        st.warning(f"Búsqueda densa no disponible temporalmente: {e}")
+        return {}
 
 def bm25_scores(bm25, tokens, query: str) -> Dict[str, float]:
     if not bm25:
@@ -232,11 +250,19 @@ def bm25_scores(bm25, tokens, query: str) -> Dict[str, float]:
 
 from typing import Tuple as _TupleAlias  # local alias to avoid confusion
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Helper to filter out unknown ids (namespace safety)
+# ───────────────────────────────────────────────────────────────────────────────
+def _filter_known_ids(scores: Dict[str, float], id2chunk: Dict[str, Dict]) -> Dict[str, float]:
+    """Keep only ids that exist in the current runtime's id2chunk map."""
+    return {k: v for k, v in (scores or {}).items() if k in id2chunk}
+
 def hybrid_retrieve(query: str, top_k: int, id2chunk: Dict[str, Dict], bm25, tokenized) -> _TupleAlias[List[Dict], float]:
     client, _ = get_clients()
     index, _, _, _ = ingest_pdf_build_bm25_and_index()
 
     dense = dense_search(index, client, query, DENSE_FETCH)  # id -> score
+    dense = _filter_known_ids(dense, id2chunk)
     ndense = normalize_scores(dense)
 
     nbm25: Dict[str, float] = {}
@@ -253,10 +279,15 @@ def hybrid_retrieve(query: str, top_k: int, id2chunk: Dict[str, Dict], bm25, tok
     combined = {cid: ALPHA * nbm25.get(cid, 0.0) + (1 - ALPHA) * ndense.get(cid, 0.0)
                 for cid in combined_ids}
 
+    if not combined:
+        return [], 0.0
+
     top = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
     out = []
     for cid, score in top:
-        c = id2chunk[cid]
+        c = id2chunk.get(cid)
+        if not c:
+            continue
         out.append({"id": cid, "score": score, "page": c["page"], "text": c["text"]})
     max_score = top[0][1] if top else 0.0
     return out, max_score
@@ -264,7 +295,7 @@ def hybrid_retrieve(query: str, top_k: int, id2chunk: Dict[str, Dict], bm25, tok
 # ───────────────────────────────────────────────────────────────────────────────
 # LLM ORCHESTRATION
 # ───────────────────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = SYSTEM_PROMPT = """Eres el *Asistente de Garantías Commencal*.
+SYSTEM_PROMPT = """Eres el *Asistente de Garantías Commencal*.
 Tu función es ayudar a clientes con preguntas sobre **garantías de bicicletas** usando la información provista en el documento adjunto (fragmentos con número de página).
 Reglas:
 - Responde **en el mismo idioma que el usuario**, a menos que se te indique un idioma explícito en la configuración de la barra lateral.
@@ -298,12 +329,12 @@ def call_llm(messages: List[Dict]) -> str:
     return resp.choices[0].message.content
 
 def answer_query(query: str, history_for_llm: List[Dict]) -> Tuple[str, List[Dict], float]:
-    index, bm25, tokenized, id2chunk = ingest_pdf_build_bm25_and_index()
+    index, bm25, tokenized, id2chunk = ingest_pdf_build_bm25_and_index(PDF_SIG)
     snippets, max_conf = hybrid_retrieve(query, TOP_K, id2chunk, bm25, tokenized)
 
     context_block = build_context_block(snippets)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        # Ajuste de idioma según la barra lateral
+    # Ajuste de idioma según la barra lateral
     lang_choice = st.session_state.get("lang_choice", "Auto (mismo del usuario)")
     if lang_choice != "Auto (mismo del usuario)":
         # Forzar un idioma concreto
@@ -378,9 +409,18 @@ with st.sidebar:
         # Clear caches so ingest runs again
         ingest_pdf_build_bm25_and_index.clear()
         st.success("Listo. Vuelve a hacer una pregunta (se reconstruyó el índice/estado cacheado).")
+        try:
+            client, pc = get_clients()
+            index = ensure_index(pc)
+            # Delete all vectors in this namespace to avoid stale ids from previous ingests
+            index.delete(delete_all=True, namespace=NAMESPACE)
+            ingest_pdf_build_bm25_and_index.clear()
+            st.success("Índice y namespace reiniciados. Se reingestará en la próxima consulta.")
+        except Exception as e:
+            st.warning(f"No se pudo limpiar el namespace automáticamente: {e}")
 
 # warm up / ensure index exists & (if empty) ingest
-_ = ingest_pdf_build_bm25_and_index()
+_ = ingest_pdf_build_bm25_and_index(PDF_SIG)
 
 st.markdown("### 💬 Asistente de Garantías Commencal (RAG)")
 st.caption("Haz tu pregunta sobre garantías. Ej.: *¿Qué no cubre la garantía para el cuadro META 2021?*")
@@ -397,7 +437,8 @@ for role, content, src in st.session_state.chat:
         if role == "assistant" and src:
             with st.expander("📎 Fuentes (fragmentos y páginas)"):
                 for i, s in enumerate(src, 1):
-                    st.markdown(f"**{i}.** p.{s['page']} — {s['text'][:350]}{'…' if len(s['text'])>350 else ''}")
+                    score_str = f" · score {s.get('score', 0):.2f}" if isinstance(s, dict) and 'score' in s else ""
+                    st.markdown(f"**{i}.** p.{s['page']}{score_str} — {s['text'][:350]}{'…' if len(s['text'])>350 else ''}")
 
 prompt = st.chat_input("Escribe un mensaje…")
 if prompt:
@@ -416,7 +457,9 @@ if prompt:
         with st.spinner("Pensando…"):
             reply, sources, conf = answer_query(prompt, history_for_llm)
             st.markdown(f"<div class='bot-bubble'>{reply}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-gray'>Confianza aprox.: {conf:.2f}</div>", unsafe_allow_html=True)
             with st.expander("📎 Fuentes (fragmentos y páginas)"):
                 for i, s in enumerate(sources, 1):
-                    st.markdown(f"**{i}.** p.{s['page']} — {s['text'][:350]}{'…' if len(s['text'])>350 else ''}")
+                    score_str = f" · score {s.get('score', 0):.2f}" if isinstance(s, dict) and 'score' in s else ""
+                    st.markdown(f"**{i}.** p.{s['page']}{score_str} — {s['text'][:350]}{'…' if len(s['text'])>350 else ''}")
     st.session_state.chat.append(("assistant", reply, sources))

@@ -258,7 +258,7 @@ def hybrid_retrieve(query: str, top_k: int, id2chunk: Dict[str, Dict], bm25, tok
 # LLM ORCHESTRATION
 # ───────────────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Eres el *Asistente de Garantías Commencal*.
-Tu función es ayudar en **español de Chile** a clientes con preguntas sobre **garantías de bicicletas** usando la información provista en el documento adjunto (fragmentos con número de página).
+Tu función es ayudar en a clientes con preguntas sobre **garantías de bicicletas** usando la información provista en el documento adjunto (fragmentos con número de página).
 Reglas:
 - Sé educado, claro y conciso. Usa viñetas cuando ayuden.
 - Puedes hacer **preguntas de seguimiento** para identificar modelo, año, tamaño de rueda, recorrido, etc., si es relevante.

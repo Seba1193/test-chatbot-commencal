@@ -16,16 +16,67 @@ from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
 from pypdf import PdfReader
 
+# Helper: read secret from st.secrets or env var, with FORCE override
+def _sec(name: str, default: str | None = None):
+    """
+    Read a secret with this priority:
+    1) st.secrets[f"{name}_FORCE"] or env var f"{name}_FORCE" (hard override for debugging)
+    2) st.secrets[name]
+    3) os.environ[name]
+    """
+    override_name = f"{name}_FORCE"
+    try:
+        v = st.secrets.get(override_name)
+    except Exception:
+        v = None
+    if not v:
+        v = os.getenv(override_name)
+    if v:
+        return v
+    try:
+        v = st.secrets.get(name)  # returns None if missing
+    except Exception:
+        v = None
+    return v or os.getenv(name, default)
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Diagnostic utilities for API key debugging
+# ───────────────────────────────────────────────────────────────────────────────
+def _mask_key(k: str) -> str:
+    if not k:
+        return "(vacía)"
+    head = k[:8]
+    tail = k[-4:]
+    return f"{head}…{tail}"
+
+def _key_origin(name: str = "OPENAI_API_KEY") -> str:
+    """Report whether a key is coming from st.secrets or env, for debugging."""
+    in_secrets = False
+    try:
+        in_secrets = bool(st.secrets.get(name))
+    except Exception:
+        in_secrets = False
+    in_env = bool(os.getenv(name))
+    if in_secrets:
+        return "secrets"
+    if in_env:
+        return "env"
+    return "missing"
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Quick sanity checks (env vars and PDF path)
 # ───────────────────────────────────────────────────────────────────────────────
-if not os.getenv("OPENAI_API_KEY") or not os.getenv("PINECONE_API_KEY"):
-    # Fail fast with a clear message in the UI
-    st.error("Faltan variables de entorno: OPENAI_API_KEY o PINECONE_API_KEY. Configúralas y reinicia la app.")
+if not _sec("OPENAI_API_KEY") or not _sec("PINECONE_API_KEY"):
+    st.error("Faltan claves: OPENAI_API_KEY y/o PINECONE_API_KEY. Cárgalas en **Settings → Secrets** (Streamlit Cloud) o como variables de entorno y reinicia la app.")
     st.stop()
 
+# Notice only: project-scoped keys may fail outside their project; continue anyway
+_oa = _sec("OPENAI_API_KEY")
+if _oa and _oa.startswith("sk-proj-"):
+    st.info("Usando una **clave de proyecto** (`sk-proj-…`). Si ves errores 401, verifica que el proyecto tenga permiso/cuota para este despliegue. Puedes definir `OPENAI_API_KEY_FORCE` en Secrets para probar otra clave temporalmente.")
+
 # Resolve PDF path from env/secret (falls back to repo root file)
-PDF_PATH = os.getenv("PDF_PATH", "Condiciones_generales.pdf")
+PDF_PATH = _sec("PDF_PATH", "Condiciones_generales.pdf")
 if not os.path.exists(PDF_PATH):
     st.error(f"No se encontró el PDF en la ruta indicada: '{PDF_PATH}'. Verifica el path y nombre del archivo, súbelo al repo o define la variable `PDF_PATH` en Secrets.")
     st.stop()
@@ -124,11 +175,13 @@ def normalize_scores(d: Dict[str, float]) -> Dict[str, float]:
 # ───────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_clients():
-    # Keys must come from env vars (no hardcoding)
-    if not os.getenv("OPENAI_API_KEY") or not os.getenv("PINECONE_API_KEY"):
-        st.error("Faltan las claves OPENAI_API_KEY y/o PINECONE_API_KEY en el entorno. Configúralas y recarga.")
+    oa_key = _sec("OPENAI_API_KEY")
+    pc_key = _sec("PINECONE_API_KEY")
+    if not oa_key or not pc_key:
+        st.error("Faltan las claves OPENAI_API_KEY y/o PINECONE_API_KEY. Cárgalas en **Settings → Secrets** o como variables de entorno.")
         st.stop()
-    return OpenAI(), Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+    # Pass the key explicitly to the OpenAI client (avoids relying on global env)
+    return OpenAI(api_key=oa_key), Pinecone(api_key=pc_key)
 
 def ensure_index(pc: Pinecone):
     # Handle different return shapes across pinecone client versions
@@ -396,6 +449,17 @@ with st.sidebar:
       #         "Para ejecutar: `streamlit run Bot.py`.\n"
        #        "Paquete correcto: `pinecone` (no `pinecone-client`).")
 
+    # --- Diagnostics: show if override is active ---
+    with st.expander("🩺 Diagnóstico de API keys", expanded=False):
+        def _mask_key(k):
+            if not k: return ""
+            return k[:6] + "..." + k[-4:]
+        oa_key = _sec("OPENAI_API_KEY")
+        st.write(f"OPENAI_API_KEY: `{_mask_key(oa_key)}`")
+        oa_key_force = _sec("OPENAI_API_KEY_FORCE")
+        if oa_key_force:
+            st.warning(f"Override activo: usando `OPENAI_API_KEY_FORCE` → `{_mask_key(oa_key_force)}`")
+
         # Idioma de salida
     lang_choice = st.selectbox(
         "Idioma de respuesta",
@@ -404,6 +468,37 @@ with st.sidebar:
         help="Elige un idioma fijo o deja 'Auto' para responder en el idioma del usuario."
     )
     st.session_state["lang_choice"] = lang_choice
+
+    # ──────────────── Diagnóstico de API keys ────────────────
+    with st.expander("🔐 Diagnóstico de API keys"):
+        origin = _key_origin("OPENAI_API_KEY")
+        oa_key = _sec("OPENAI_API_KEY")
+        key_type = "project (sk-proj-…)" if (oa_key or "").startswith("sk-proj-") else ("personal (sk-…)" if (oa_key or "").startswith("sk-") else "desconocido")
+        st.markdown(f"**Origen de OPENAI_API_KEY:** `{origin}`")
+        st.markdown(f"**Tipo de clave detectada:** {key_type}")
+        st.markdown(f"**Prefijo (enmascarado):** `{_mask_key(oa_key)}`")
+
+        colA, colB = st.columns(2)
+        with colA:
+            if st.button("✅ Probar clave OpenAI"):
+                try:
+                    client, _ = get_clients()
+                    # operación muy liviana: listar modelos
+                    _ = client.models.list()
+                    st.success("La clave funciona (respuesta 200).")
+                except Exception as e:
+                    st.error(f"Fallo al probar la clave: {e}")
+        with colB:
+            if st.button("♻️ Resetear cachés"):
+                try:
+                    get_clients.clear()
+                except Exception:
+                    pass
+                try:
+                    ingest_pdf_build_bm25_and_index.clear()
+                except Exception:
+                    pass
+                st.success("Cachés reiniciadas. Vuelve a probar.")
 
     if st.button("🔁 Reingestar PDF en el índice"):
         # Clear caches so ingest runs again
